@@ -83,9 +83,9 @@ FIX_DATE=$(date +%Y-%m-%d)
 BAD_MSG=$(git log --format="%s" "$BAD_COMMIT" -1)
 BAD_AUTHOR=$(git log --format="%an" "$BAD_COMMIT" -1)
 
-ISSUE_URL=$(gh issue create \
-  --title "[auto-fix] CI regression fixed — $FIX_DATE" \
-  --body "## 🤖 CI Auto-Fix Report
+# 写 body 到临时文件，避免内嵌引号问题
+cat > /tmp/issue-body.md << EOF
+## 🤖 CI Auto-Fix Report
 
 **Date**: $FIX_DATE
 **Status**: ✅ Automatically fixed
@@ -105,10 +105,23 @@ ISSUE_URL=$(gh issue create \
 5. Fix pushed to main
 
 ### ⚠️ Action Required
-If this was an intentional change, check whether the revert lost desired functionality." \
-  --label "auto-fix,regression" 2>&1)
+If this was an intentional change, check whether the revert lost desired functionality.
+EOF
 
-echo "✅ Issue created: $ISSUE_URL"
+set +e
+ISSUE_URL=$(gh issue create \
+  --title "[auto-fix] CI regression fixed — $FIX_DATE" \
+  --body-file /tmp/issue-body.md \
+  --label "auto-fix,regression" 2>&1)
+GH_EXIT=$?
+set -e
+
+if [ $GH_EXIT -eq 0 ]; then
+  echo "✅ Issue created: $ISSUE_URL"
+else
+  echo "⚠️ Issue creation failed (gh exit=$GH_EXIT): $ISSUE_URL"
+  ISSUE_URL="(issue creation failed)"
+fi
 
 # ---- STEP 6: UPDATE STATE ----
 echo ""
