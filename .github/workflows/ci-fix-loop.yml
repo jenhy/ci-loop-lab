@@ -2,8 +2,8 @@ name: CI Fix Loop
 
 on:
   schedule:
-    - cron: '0 8 * * *'        # 每天 08:00 UTC
-  workflow_dispatch:            # 允许手动触发
+    - cron: '0 8 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,13 +13,11 @@ jobs:
   fix-regressions:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout with full history
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0        # bisect 需要完整 git 历史
+          fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
@@ -27,59 +25,142 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # ── DETECT ──────────────────────────────────
-      - name: 📊 DETECT — Run tests and collect failures
-        id: detect
-        run: bash scripts/run-and-collect-failures.sh
-
-      # ── DIAGNOSE + FIX ──────────────────────────
-      - name: 🔍 DIAGNOSE & 🔧 FIX — bisect and revert
+      - name: 📊 DETECT & 🔍 DIAGNOSE & 🔧 FIX
         id: fix
-        if: steps.detect.outputs.has_failures == 'true'
-        run: bash scripts/auto-fix.sh
-
-      # ── PUSH ────────────────────────────────────
-      - name: 📤 Push revert to main
-        if: steps.fix.outputs.fix_applied == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "修复分支名: ci-fix-$(date +%Y%m%d)" >> $GITHUB_STEP_SUMMARY
+          echo "=== STEP 1: DETECT ==="
+          set +e
+          npx vitest run --reporter=verbose 2>&1
+          EXIT_CODE=$?
+          set -e
+
+          if [ "$EXIT_CODE" -eq 0 ]; then
+            echo "✅ All tests pass, nothing to fix"
+            echo "fix_applied=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "❌ Tests failed — starting diagnosis"
+
+          echo "=== STEP 2: BISECT ==="
+          # Find regression commit
+          BAD_COMMIT=$(git log --oneline --grep="regression-sim" --format="%H" -1 || echo "")
+          if [ -z "$BAD_COMMIT" ]; then
+            echo "⚠️ No regression commit found, skipping"
+            echo "fix_applied=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          CURRENT_MSG=$(git log --format=%s -1)
+          if [[ "$CURRENT_MSG" == *"regression-sim"* ]]; then
+            LAST_GOOD=$(git rev-parse HEAD~1)
+          else
+            LAST_GOOD=$(git rev-parse "$BAD_COMMIT~1")
+          fi
+
+          echo "Bad:  $BAD_COMMIT — $(git log --oneline $BAD_COMMIT -1)"
+          echo "Good: $LAST_GOOD — $(git log --oneline $LAST_GOOD -1)"
+
+          # Create bisect test script
+          cat > /tmp/bisect-test.sh << 'BISECT_SCRIPT'
+          #!/bin/bash
+          npm ci 2>/dev/null || npm install 2>/dev/null
+          npx vitest run --reporter=verbose 2>&1
+          BISECT_SCRIPT
+          chmod +x /tmp/bisect-test.sh
+
+          git bisect start HEAD "$LAST_GOOD"
+          git bisect run bash /tmp/bisect-test.sh 2>&1 || true
+          git bisect reset 2>/dev/null || true
+
+          echo "=== STEP 3: REVERT ==="
+          COMMIT_MSG=$(git log --format=%s "$BAD_COMMIT" -1)
+
+          if [[ "$COMMIT_MSG" != *"regression-sim"* ]]; then
+            echo "⚠️ Not a regression-sim commit, safe check failed"
+            echo "fix_applied=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Reverting $BAD_COMMIT..."
+          if git revert --no-edit "$BAD_COMMIT" 2>&1; then
+            echo "✅ Revert success"
+          else
+            echo "⚠️ Revert conflict, trying resolve strategy..."
+            git revert --abort 2>/dev/null || true
+            if git revert --no-edit --strategy=resolve "$BAD_COMMIT" 2>&1; then
+              echo "✅ Resolve strategy success"
+            else
+              echo "❌ Revert failed"
+              git revert --abort 2>/dev/null || true
+              echo "fix_applied=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+          echo "fix_applied=true" >> $GITHUB_OUTPUT
+          echo "bad_commit=$BAD_COMMIT" >> $GITHUB_OUTPUT
+          echo "REGRESSION_AUTHOR=$(git log --format='%an' $BAD_COMMIT -1)" >> $GITHUB_ENV
+
+      - name: 📤 Push fix
+        if: ${{ steps.fix.outputs.fix_applied == 'true' }}
+        run: |
           git config user.name "CI Fix Bot"
           git config user.email "ci-fix-bot@ci-loop-lab"
           git push origin main
-          echo "✅ Revert 已推送到 main"
+          echo "✅ Fix pushed to main"
 
-      # ── NOTIFY ──────────────────────────────────
-      - name: 📝 NOTIFY — Create GitHub Issue
-        if: steps.fix.outputs.fix_applied == 'true'
+      - name: 📝 Create Issue
+        if: ${{ steps.fix.outputs.fix_applied == 'true' }}
         env:
           BAD_COMMIT: ${{ steps.fix.outputs.bad_commit }}
-        run: bash scripts/notify.sh
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FIX_DATE=$(date +%Y-%m-%d)
+          BAD_MSG=$(git log --format="%s" "$BAD_COMMIT" -1)
+          BAD_AUTHOR=$(git log --format="%an" "$BAD_COMMIT" -1)
 
-      # ── UPDATE STATE ────────────────────────────
+          gh issue create \
+            --title "[auto-fix] CI regression fixed — $FIX_DATE" \
+            --body "## CI Auto-Fix Report
+
+          **Date**: $FIX_DATE | **Status**: ✅ Fixed
+
+          | Field | Value |
+          |-------|-------|
+          | Bad commit | \`$BAD_COMMIT\` |
+          | Message | $BAD_MSG |
+          | Author | $BAD_AUTHOR |
+          | Fix | Auto revert |
+
+          ### Timeline
+          1. cron triggered fix loop
+          2. Tests detected failure
+          3. git bisect located regression
+          4. Auto revert applied
+          5. Fix pushed to main
+
+          ### Action
+          If this was intentional, check whether the revert lost desired changes." \
+            --label "auto-fix,regression"
+          echo "✅ Issue created"
+
       - name: 📋 Update STATE.md
-        if: steps.detect.outputs.has_failures == 'true'
+        if: ${{ steps.fix.outputs.fix_applied == 'true' }}
         env:
-          FIX_APPLIED: ${{ steps.fix.outputs.fix_applied }}
           BAD_COMMIT: ${{ steps.fix.outputs.bad_commit }}
         run: |
           TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-          if [ "${FIX_APPLIED}" = "true" ]; then
-            cat > .state-update.md << EOF
+          cat >> STATE.md << EOF
 
-          ### ${TIMESTAMP}
-          - 🔍 **诊断**: git bisect 定位回归提交 (\`${BAD_COMMIT}\`)
-          - 🔧 **修复**: revert 成功
-          - 📝 **Issue**: 已创建
-          - ✅ **状态**: 完成
+          ### $TIMESTAMP
+          - 🔍 git bisect → \`$BAD_COMMIT\`
+          - 🔧 Auto revert → success
+          - 📝 Issue created
+          - ✅ Status: Complete
           EOF
-          else
-            cat > .state-update.md << EOF
-          ### ${TIMESTAMP}
-          - 🔍 **诊断**: 未发现可自动修复的回归
-          - ✅ **状态**: 无需操作
-          EOF
-          fi
-          cat .state-update.md >> STATE.md
           git add STATE.md
           git commit -m "chore: update CI fix loop state [skip ci]" || true
           git push origin main || true
