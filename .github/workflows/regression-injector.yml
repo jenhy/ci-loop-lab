@@ -1,0 +1,42 @@
+name: Regression Injector
+
+on:
+  schedule:
+    - cron: '0 7 * * *'        # 每天 07:00 UTC，比 CI Fix Loop 早 1 小时
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  inject:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inject regression bug
+        run: |
+          # 先验证测试当前是通过的
+          npm ci
+          npx vitest run --reporter=verbose 2>&1 || {
+            echo "⚠️ 测试未通过，可能上次修复未完成，跳过注入"
+            exit 0
+          }
+
+          # 注入回归 bug
+          sed -i 's/return a + b;.*/return a + b + 1; \/\/ BUG: injected regression/' src/math.ts
+
+          # 验证注入后测试失败
+          npx vitest run --reporter=verbose 2>&1 || true
+          echo ""
+          echo "✅ 回归已注入"
+
+      - name: Commit and push
+        run: |
+          DATE=$(date +%Y-%m-%d)
+          git config user.name "Regression Bot"
+          git config user.email "regression-bot@ci-loop-lab"
+          git add src/math.ts
+          git commit -m "chore: [regression-sim] intentional bug injection $DATE"
+          git push origin main
+          echo "✅ 回归提交已推送 — CI Fix Loop 将在 08:00 自动修复"
