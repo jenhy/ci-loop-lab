@@ -111,8 +111,7 @@ EOF
 set +e
 ISSUE_URL=$(gh issue create \
   --title "[auto-fix] CI regression fixed — $FIX_DATE" \
-  --body-file /tmp/issue-body.md \
-  --label "auto-fix,regression" 2>&1)
+  --body-file /tmp/issue-body.md 2>&1)
 GH_EXIT=$?
 set -e
 
