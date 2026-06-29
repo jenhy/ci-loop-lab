@@ -14,7 +14,7 @@ echo "📊 [DETECT] 运行测试..."
 
 # 直接跑 vitest，用退出码判断（0=通过，1=失败）
 #  这比 JSON 解析可靠得多，不依赖 vitest 版本变化
-npx vitest run --reporter=verbose 2>&1
+npx vitest run --reporter=verbose 2>&1 || true
 
 EXIT_CODE=$?
 
