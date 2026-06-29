@@ -52,6 +52,10 @@ echo "  $(git log --oneline "$BAD_COMMIT" -1)"
 echo ""
 echo "=== STEP 3: FIX — Reverting regression ==="
 
+# git 需要身份才能执行 revert 和后续 push
+git config user.name  "CI Fix Bot"
+git config user.email "ci-fix-bot@ci-loop-lab"
+
 if git revert --no-edit "$BAD_COMMIT" 2>&1; then
   echo "✅ Revert successful"
 else
@@ -63,9 +67,6 @@ fi
 # ---- STEP 4: PUSH ----
 echo ""
 echo "=== STEP 4: PUSH — Pushing fix ==="
-
-git config user.name  "CI Fix Bot"
-git config user.email "ci-fix-bot@ci-loop-lab"
 
 if git push origin main 2>&1; then
   echo "✅ Fix pushed to main"
