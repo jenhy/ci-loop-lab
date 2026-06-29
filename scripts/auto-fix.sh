@@ -44,29 +44,17 @@ echo "  bad:  HEAD  ($(git log --oneline HEAD -1))"
 echo "  good: $LAST_GOOD ($(git log --oneline $LAST_GOOD -1))"
 
 # 创建 bisect 判断脚本
+# git bisect 在每次 checkout 后会运行此脚本
+# 当前目录 = git bisect 查出的 commit 版本
 cat > /tmp/bisect-test.sh << 'BISECT_SCRIPT'
 #!/bin/bash
 set -euo pipefail
-cd /tmp/ci-bisect-work
 
-# 安装依赖（静默模式）
+# 在当前目录安装依赖（git bisect 已 checkout 到对应版本）
 npm ci --silent 2>/dev/null || npm install --silent 2>/dev/null
 
-# 运行测试
-npx vitest run --reporter=json --outputFile=/tmp/bisect-result.json 2>/dev/null || true
-
-# 判断结果
-node -e "
-const fs = require('fs');
-let r;
-try {
-  r = JSON.parse(fs.readFileSync('/tmp/bisect-result.json', 'utf8'));
-} catch(e) {
-  process.exit(1);  // 无法解析 → bad
-}
-const failed = r.testResults.filter(t => t.status === 'fail');
-process.exit(failed.length > 0 ? 1 : 0);  // 有失败 → bad(1), 全过 → good(0)
-"
+# 用 vitest 退出码判断好坏（0=good, 非0=bad）
+npx vitest run --reporter=verbose 2>&1
 BISECT_SCRIPT
 chmod +x /tmp/bisect-test.sh
 
