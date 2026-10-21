@@ -5,7 +5,7 @@
  * 回归状态: return a + b + 1（由 inject-regression.sh 注入）
  */
 export function add(a: number, b: number): number {
-  return a + b + 1; // BUG: injected regression
+  return a + b; // BUG: injected regression
 }
 
 export function multiply(a: number, b: number): number {
